@@ -12,23 +12,25 @@ fn match_pattern(input_line: &str, pattern: &str) -> bool {
 
 // Usage: echo <input_text> | your_program.sh -E <pattern>
 fn main() {
-    // You can use print statements as follows for debugging, they'll be visible when running tests.
-    println!("Logs from your program will appear here!");
-
+    // Check if the first argument is '-E'
     if env::args().nth(1).unwrap() != "-E" {
         println!("Expected first argument to be '-E'");
         process::exit(1);
     }
 
+    // Get the pattern from the second argument
     let pattern = env::args().nth(2).unwrap();
+
+    // Read the input line from stdin
     let mut input_line = String::new();
 
+    // Read the input line from stdin
     io::stdin().read_line(&mut input_line).unwrap();
 
-    // Uncomment this block to pass the first stage
-    // if match_pattern(&input_line, &pattern) {
-    //     process::exit(0)
-    // } else {
-    //     process::exit(1)
-    // }
+    // Check if the input line matches the pattern
+    if match_pattern(&input_line, &pattern) {
+        process::exit(0)
+    } else {
+        process::exit(1)
+    }
 }
