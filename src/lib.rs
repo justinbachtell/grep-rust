@@ -18,6 +18,7 @@ pub enum Pattern {
         chars: String,
         negated: bool,
     },
+    StartOfLine,
 }
 trait CharOperations {
     fn first_char(&self) -> Option<char>;
@@ -180,6 +181,13 @@ impl Pattern {
                 }
                 results
             }
+            Pattern::StartOfLine => {
+                if data.is_empty() || data.starts_with('\n') {
+                    hash_set! { data }
+                } else {
+                    HashSet::new()
+                }
+            }
             _ => HashSet::new(),
         }
     }
@@ -306,5 +314,57 @@ mod tests {
                 .match_str("1 apple"),
             hash_set![""]
         );
+    }
+
+    #[test]
+    fn test_any_char() {
+        assert_eq!(Pattern::AnyChar.match_str("ABC"), hash_set!["BC"]);
+        assert_eq!(Pattern::AnyChar.match_str("A"), hash_set![""]);
+        assert!(Pattern::AnyChar.match_str("").is_empty());
+    }
+
+    #[test]
+    fn test_alpha_numeric() {
+        assert_eq!(Pattern::AlphaNumeric.match_str("a123"), hash_set!["123"]);
+        assert_eq!(Pattern::AlphaNumeric.match_str("_abc"), hash_set!["abc"]);
+        assert_eq!(Pattern::AlphaNumeric.match_str("9xyz"), hash_set!["xyz"]);
+        assert!(Pattern::AlphaNumeric.match_str("!abc").is_empty());
+    }
+
+    #[test]
+    fn test_one_of() {
+        let pattern = Pattern::OneOf(vec![
+            Pattern::ExactChar('a'),
+            Pattern::Digit,
+            Pattern::ExactChar('x'),
+        ]);
+        assert_eq!(pattern.match_str("abc"), hash_set!["bc"]);
+        assert_eq!(pattern.match_str("123"), hash_set!["23"]);
+        assert_eq!(pattern.match_str("xyz"), hash_set!["yz"]);
+        assert!(pattern.match_str("bcd").is_empty());
+    }
+
+    #[test]
+    fn test_character_set() {
+        let pattern = Pattern::CharacterSet {
+            chars: "aeiou".to_string(),
+            negated: false,
+        };
+        assert_eq!(pattern.match_str("apple"), hash_set!["pple"]);
+        assert!(pattern.match_str("xyz").is_empty());
+
+        let negated_pattern = Pattern::CharacterSet {
+            chars: "aeiou".to_string(),
+            negated: true,
+        };
+        assert_eq!(negated_pattern.match_str("xyz"), hash_set!["yz"]);
+        assert!(negated_pattern.match_str("apple").is_empty());
+    }
+
+    #[test]
+    fn test_from_str_errors() {
+        assert!(Pattern::from_str("a[bc").is_err());
+        assert!(Pattern::from_str("a\\").is_err());
+        assert!(Pattern::from_str("*").is_err());
     }
 }

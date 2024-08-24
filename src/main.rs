@@ -19,13 +19,10 @@ fn main() {
     let mut input = String::new();
     io::stdin().read_to_string(&mut input).unwrap();
 
-    // Trim the input to remove any trailing newline
-    let input = input.trim();
-
     // Check if the input matches the pattern
-    let matches = pattern.match_str(input);
+    let matches = pattern.match_str(&input);
 
-    if matches.iter().any(|m| m.len() < input.len()) {
+    if !matches.is_empty() {
         println!("Pattern matches!");
         process::exit(0);
     } else {
