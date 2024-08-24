@@ -2,17 +2,21 @@ use std::env;
 use std::io;
 use std::process;
 
+// check if the input line matches the pattern
 fn match_pattern(input_line: &str, pattern: &str) -> bool {
-    if pattern.chars().count() == 1 {
-        return input_line.contains(pattern);
-    } else if pattern == "\\d" {
-        return input_line.chars().any(|c| c.is_digit(10));
-    } else if pattern == "\\w" {
-        return input_line.chars().any(|c| c.is_alphanumeric() || c == '_');
-    } else if pattern.chars().nth(0).unwrap() == '[' && pattern.chars().last().unwrap() == ']' {
-        return input_line.chars().any(|c| pattern.contains(c));
-    } else {
-        panic!("Unhandled pattern: {}", pattern)
+    match pattern {
+        s if s.chars().count() == 1 => input_line.contains(pattern),
+        r#"\d"# => input_line.chars().any(|c| c.is_digit(10)),
+        r#"\w"# => input_line.chars().any(|c| c.is_ascii_alphanumeric() || c == '_'),
+        s if s.starts_with("[^") && s.ends_with(']') => {
+            let char_group = &pattern[2..pattern.len() - 1];
+            input_line.chars().any(|c| !char_group.contains(c))
+        }
+        s if s.starts_with('[') && s.ends_with(']') => {
+            let char_group = &pattern[1..pattern.len() - 1];
+            input_line.chars().any(|c| char_group.contains(c))
+        }
+        _ => panic!("Unhandled pattern: {}", pattern),
     }
 }
 
@@ -33,8 +37,11 @@ fn main() {
     // Read the input line from stdin
     io::stdin().read_line(&mut input_line).unwrap();
 
+    // Trim the input line to remove any trailing newline
+    let input_line = input_line.trim();
+
     // Check if the input line matches the pattern
-    if match_pattern(&input_line, &pattern) {
+    if match_pattern(input_line, &pattern) {
         println!("Pattern matches!");
         process::exit(0)
     } else {
