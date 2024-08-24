@@ -1,51 +1,35 @@
 use std::env;
-use std::io;
+use std::io::{self, Read};
 use std::process;
+use std::str::FromStr;
+use codecrafters_grep::Pattern;
 
-// check if the input line matches the pattern
-fn match_pattern(input_line: &str, pattern: &str) -> bool {
-    match pattern {
-        s if s.chars().count() == 1 => input_line.contains(pattern),
-        r#"\d"# => input_line.chars().any(|c| c.is_digit(10)),
-        r#"\w"# => input_line.chars().any(|c| c.is_ascii_alphanumeric() || c == '_'),
-        s if s.starts_with("[^") && s.ends_with(']') => {
-            let char_group = &pattern[2..pattern.len() - 1];
-            input_line.chars().any(|c| !char_group.contains(c))
-        }
-        s if s.starts_with('[') && s.ends_with(']') => {
-            let char_group = &pattern[1..pattern.len() - 1];
-            input_line.chars().any(|c| char_group.contains(c))
-        }
-        _ => panic!("Unhandled pattern: {}", pattern),
-    }
-}
-
-// Usage: echo <input_text> | your_program.sh -E <pattern>
 fn main() {
     // Check if the first argument is '-E'
     if env::args().nth(1).unwrap() != "-E" {
-        println!("Expected first argument to be '-E'");
+        eprintln!("Expected first argument to be '-E'");
         process::exit(1);
     }
 
     // Get the pattern from the second argument
-    let pattern = env::args().nth(2).unwrap();
+    let pattern_str = env::args().nth(2).expect("No pattern provided");
+    let pattern = Pattern::from_str(&pattern_str).expect("Invalid pattern");
 
-    // Define a mutable string to store the input line
-    let mut input_line = String::new();
+    // Read the entire input from stdin
+    let mut input = String::new();
+    io::stdin().read_to_string(&mut input).unwrap();
 
-    // Read the input line from stdin
-    io::stdin().read_line(&mut input_line).unwrap();
+    // Trim the input to remove any trailing newline
+    let input = input.trim();
 
-    // Trim the input line to remove any trailing newline
-    let input_line = input_line.trim();
+    // Check if the input matches the pattern
+    let matches = pattern.match_str(input);
 
-    // Check if the input line matches the pattern
-    if match_pattern(input_line, &pattern) {
+    if matches.iter().any(|m| m.len() < input.len()) {
         println!("Pattern matches!");
-        process::exit(0)
+        process::exit(0);
     } else {
         println!("Pattern does not match.");
-        process::exit(1)
+        process::exit(1);
     }
 }
