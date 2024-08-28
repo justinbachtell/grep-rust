@@ -20,6 +20,7 @@ pub enum Pattern {
     StartOfLine,
     EndOfLine,
     OneOrMore(Box<Pattern>),
+    ZeroOrOne(Box<Pattern>),
 }
 
 impl FromStr for Pattern {
@@ -71,6 +72,12 @@ impl FromStr for Pattern {
                     match items.pop() {
                         Some(p) => Pattern::OneOrMore(Box::new(p)),
                         None => return Err("Invalid '+' quantifier".into()),
+                    }
+                }
+                '?' => {
+                    match items.pop() {
+                        Some(p) => Pattern::ZeroOrOne(Box::new(p)),
+                        None => return Err("Invalid '?' quantifier".into()),
                     }
                 }
                 e => Pattern::ExactChar(e),
@@ -155,6 +162,9 @@ impl Pattern {
                     matched = true;
                 }
                 matched
+            },
+            Pattern::ZeroOrOne(pattern) => {
+                pattern.consume_match(data).is_some() || true
             }
         }
     }
@@ -216,6 +226,9 @@ impl Pattern {
                     remaining = new_remaining;
                 }
                 length
+            },
+            Pattern::ZeroOrOne(pattern) => {
+                pattern.consume_match(data).map_or(0, |r| data.len() - r.len())
             },
         }
     }
@@ -429,5 +442,15 @@ mod tests {
         assert_eq!(Pattern::from_str("ca+ts").expect("valid").match_str("caats"), true);
         assert_eq!(Pattern::from_str("ca+ts").expect("valid").match_str("cats"), true);
         assert_eq!(Pattern::from_str("ca+ts").expect("valid").match_str("cts"), false);
+    }
+
+    #[test]
+    fn test_zero_or_one() {
+        assert_eq!(Pattern::from_str("dogs?").expect("valid").match_str("dogs"), true);
+        assert_eq!(Pattern::from_str("dogs?").expect("valid").match_str("dog"), true);
+        assert_eq!(Pattern::from_str("dogs?").expect("valid").match_str("dogss"), false);
+        assert_eq!(Pattern::from_str("dogs?").expect("valid").match_str("cat"), false);
+        assert_eq!(Pattern::from_str("colou?r").expect("valid").match_str("color"), true);
+        assert_eq!(Pattern::from_str("colou?r").expect("valid").match_str("colour"), true);
     }
 }
