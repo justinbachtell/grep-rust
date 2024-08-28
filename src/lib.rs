@@ -19,6 +19,7 @@ pub enum Pattern {
     },
     StartOfLine,
     EndOfLine,
+    OneOrMore(Box<Pattern>),
 }
 
 impl FromStr for Pattern {
@@ -66,6 +67,12 @@ impl FromStr for Pattern {
                 }
                 '^' if items.is_empty() => Pattern::StartOfLine,
                 '$' if char_iterator.clone().next().is_none() => Pattern::EndOfLine,
+                '+' => {
+                    match items.pop() {
+                        Some(p) => Pattern::OneOrMore(Box::new(p)),
+                        None => return Err("Invalid '+' quantifier".into()),
+                    }
+                }
                 e => Pattern::ExactChar(e),
             };
             items.push(el);
@@ -140,6 +147,15 @@ impl Pattern {
                 count >= *min
             },
             Pattern::EndOfLine => data.is_empty(),
+            Pattern::OneOrMore(pattern) => {
+                let mut remaining = data;
+                let mut matched = false;
+                while let Some(new_remaining) = pattern.consume_match(remaining) {
+                    remaining = new_remaining;
+                    matched = true;
+                }
+                matched
+            }
         }
     }
 
@@ -192,6 +208,15 @@ impl Pattern {
                 length
             },
             Pattern::EndOfLine => 0,
+            Pattern::OneOrMore(pattern) => {
+                let mut length = 0;
+                let mut remaining = data;
+                while let Some(new_remaining) = pattern.consume_match(remaining) {
+                    length += remaining.len() - new_remaining.len();
+                    remaining = new_remaining;
+                }
+                length
+            },
         }
     }
 }
@@ -393,5 +418,16 @@ mod tests {
         assert_eq!(Pattern::from_str("cat$").expect("valid").match_str("a cat"), true);
         assert_eq!(Pattern::from_str("^cat$").expect("valid").match_str("cat"), true);
         assert_eq!(Pattern::from_str("^cat$").expect("valid").match_str("a cat"), false);
+    }
+
+    #[test]
+    fn test_one_or_more() {
+        assert_eq!(Pattern::from_str("a+").expect("valid").match_str("a"), true);
+        assert_eq!(Pattern::from_str("a+").expect("valid").match_str("aa"), true);
+        assert_eq!(Pattern::from_str("a+").expect("valid").match_str(""), false);
+        assert_eq!(Pattern::from_str("a+").expect("valid").match_str("b"), false);
+        assert_eq!(Pattern::from_str("ca+ts").expect("valid").match_str("caats"), true);
+        assert_eq!(Pattern::from_str("ca+ts").expect("valid").match_str("cats"), true);
+        assert_eq!(Pattern::from_str("ca+ts").expect("valid").match_str("cts"), false);
     }
 }
