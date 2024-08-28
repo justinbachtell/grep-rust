@@ -21,73 +21,103 @@ pub enum Pattern {
     EndOfLine,
     OneOrMore(Box<Pattern>),
     ZeroOrOne(Box<Pattern>),
+    Alternation(Vec<Pattern>),
 }
 
 impl FromStr for Pattern {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let mut char_iterator = s.chars();
-        let mut items = Vec::new();
-        while let Some(c) = char_iterator.next() {
-            let el = match c {
-                '\\' => match char_iterator.next() {
-                    Some('w') => Pattern::AlphaNumeric,
-                    Some('d') => Pattern::CharacterSet { chars: "0123456789".to_string(), negated: false },
-                    Some(c) => Pattern::ExactChar(c),
-                    None => return Err(format!("Unterminated escape in {:?}", s)),
-                },
-                '.' => Pattern::AnyChar,
-                '*' => {
-                    match items.pop() {
-                        Some(p) => Pattern::Repeated {
-                            min: 0,
-                            max: None,
-                            pattern: Box::new(p),
-                        },
-                        None => return Err("Invalid repeat".into()),
+        fn parse_group(s: &str, chars: &mut std::str::Chars) -> Result<Pattern, String> {
+            let mut alternatives = vec![];
+            let mut current = vec![];
+
+            while let Some(c) = chars.next() {
+                match c {
+                    '(' => {
+                        current.push(parse_group(s, chars)?);
                     }
-                }
-                '[' => {
-                    let mut chars = String::new();
-                    let mut found_end = false;
-                    let mut negated = false;
-                    for c2 in char_iterator.by_ref() {
-                        match c2 {
-                            '^' if chars.is_empty() => negated = true,
-                            ']' => {
-                                found_end = true;
-                                break;
-                            }
-                            other => chars.push(other),
+                    ')' => {
+                        if !current.is_empty() {
+                            alternatives.push(Pattern::Sequence(current));
+                        }
+                        return if alternatives.len() == 1 {
+                            Ok(alternatives.pop().unwrap())
+                        } else {
+                            Ok(Pattern::Alternation(alternatives))
+                        };
+                    }
+                    '|' => {
+                        if !current.is_empty() {
+                            alternatives.push(Pattern::Sequence(current));
+                            current = vec![];
                         }
                     }
-                    if !found_end {
-                        return Err("Unterminated '[' pattern".into());
+                    '\\' => match chars.next() {
+                        Some('w') => current.push(Pattern::AlphaNumeric),
+                        Some('d') => current.push(Pattern::CharacterSet { chars: "0123456789".to_string(), negated: false }),
+                        Some(c) => current.push(Pattern::ExactChar(c)),
+                        None => return Err(format!("Unterminated escape in {:?}", s)),
+                    },
+                    '.' => current.push(Pattern::AnyChar),
+                    '*' => {
+                        match current.pop() {
+                            Some(p) => current.push(Pattern::Repeated {
+                                min: 0,
+                                max: None,
+                                pattern: Box::new(p),
+                            }),
+                            None => return Err("Invalid repeat".into()),
+                        }
                     }
-                    Pattern::CharacterSet { chars, negated }
-                }
-                '^' if items.is_empty() => Pattern::StartOfLine,
-                '$' if char_iterator.clone().next().is_none() => Pattern::EndOfLine,
-                '+' => {
-                    match items.pop() {
-                        Some(p) => Pattern::OneOrMore(Box::new(p)),
-                        None => return Err("Invalid '+' quantifier".into()),
+                    '[' => {
+                        let mut chars_set = String::new();
+                        let mut found_end = false;
+                        let mut negated = false;
+                        while let Some(c2) = chars.next() {
+                            match c2 {
+                                '^' if chars_set.is_empty() => negated = true,
+                                ']' => {
+                                    found_end = true;
+                                    break;
+                                }
+                                other => chars_set.push(other),
+                            }
+                        }
+                        if !found_end {
+                            return Err("Unterminated '[' pattern".into());
+                        }
+                        current.push(Pattern::CharacterSet { chars: chars_set, negated });
                     }
-                }
-                '?' => {
-                    match items.pop() {
-                        Some(p) => Pattern::ZeroOrOne(Box::new(p)),
-                        None => return Err("Invalid '?' quantifier".into()),
+                    '^' if current.is_empty() => current.push(Pattern::StartOfLine),
+                    '$' if chars.clone().next().is_none() => current.push(Pattern::EndOfLine),
+                    '+' => {
+                        match current.pop() {
+                            Some(p) => current.push(Pattern::OneOrMore(Box::new(p))),
+                            None => return Err("Invalid '+' quantifier".into()),
+                        }
                     }
+                    '?' => {
+                        match current.pop() {
+                            Some(p) => current.push(Pattern::ZeroOrOne(Box::new(p))),
+                            None => return Err("Invalid '?' quantifier".into()),
+                        }
+                    }
+                    e => current.push(Pattern::ExactChar(e)),
                 }
-                e => Pattern::ExactChar(e),
-            };
-            items.push(el);
+            }
+
+            if !current.is_empty() {
+                alternatives.push(Pattern::Sequence(current));
+            }
+
+            if alternatives.len() == 1 {
+                Ok(alternatives.pop().unwrap())
+            } else {
+                Ok(Pattern::Alternation(alternatives))
+            }
         }
-        if items.len() == 1 {
-            return Ok(items.pop().expect("has an element"));
-        }
-        Ok(Pattern::Sequence(items))
+
+        parse_group(s, &mut s.chars())
     }
 }
 
@@ -165,7 +195,8 @@ impl Pattern {
             },
             Pattern::ZeroOrOne(pattern) => {
                 pattern.consume_match(data).is_some() || true
-            }
+            },
+            Pattern::Alternation(patterns) => patterns.iter().any(|p| p.match_from_start(data)),
         }
     }
 
@@ -230,6 +261,11 @@ impl Pattern {
             Pattern::ZeroOrOne(pattern) => {
                 pattern.consume_match(data).map_or(0, |r| data.len() - r.len())
             },
+            Pattern::Alternation(patterns) => patterns
+                .iter()
+                .filter_map(|p| p.consume_match(data).map(|r| data.len() - r.len()))
+                .max()
+                .unwrap_or(0),
         }
     }
 }
@@ -452,5 +488,23 @@ mod tests {
         assert_eq!(Pattern::from_str("dogs?").expect("valid").match_str("cat"), false);
         assert_eq!(Pattern::from_str("colou?r").expect("valid").match_str("color"), true);
         assert_eq!(Pattern::from_str("colou?r").expect("valid").match_str("colour"), true);
+    }
+
+    #[test]
+    fn test_dot_pattern() {
+        assert_eq!(Pattern::from_str("d.g").expect("valid").match_str("dog"), true);
+        assert_eq!(Pattern::from_str("d.g").expect("valid").match_str("dig"), true);
+        assert_eq!(Pattern::from_str("d.g").expect("valid").match_str("cog"), false);
+        assert_eq!(Pattern::from_str("d.g").expect("valid").match_str("dg"), false);
+    }
+
+    #[test]
+    fn test_alternation() {
+        assert_eq!(Pattern::from_str("(cat|dog)").expect("valid").match_str("cat"), true);
+        assert_eq!(Pattern::from_str("(cat|dog)").expect("valid").match_str("dog"), true);
+        assert_eq!(Pattern::from_str("(cat|dog)").expect("valid").match_str("apple"), false);
+        assert_eq!(Pattern::from_str("a(b|c)d").expect("valid").match_str("abd"), true);
+        assert_eq!(Pattern::from_str("a(b|c)d").expect("valid").match_str("acd"), true);
+        assert_eq!(Pattern::from_str("a(b|c)d").expect("valid").match_str("ad"), false);
     }
 }
