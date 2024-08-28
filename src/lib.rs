@@ -22,6 +22,7 @@ pub enum Pattern {
     OneOrMore(Box<Pattern>),
     ZeroOrOne(Box<Pattern>),
     Alternation(Vec<Pattern>),
+    Backreference(usize),
 }
 
 impl FromStr for Pattern {
@@ -55,6 +56,10 @@ impl FromStr for Pattern {
                     '\\' => match chars.next() {
                         Some('w') => current.push(Pattern::AlphaNumeric),
                         Some('d') => current.push(Pattern::CharacterSet { chars: "0123456789".to_string(), negated: false }),
+                        Some(c) if c.is_digit(10) => {
+                            let backreference = c.to_digit(10).unwrap() as usize;
+                            current.push(Pattern::Backreference(backreference));
+                        },
                         Some(c) => current.push(Pattern::ExactChar(c)),
                         None => return Err(format!("Unterminated escape in {:?}", s)),
                     },
@@ -125,43 +130,53 @@ impl Pattern {
     #[instrument]
     pub fn match_str(&self, data: &str) -> bool {
         trace!("Matching starts");
+        let mut captured_groups = Vec::new();
+        self.match_str_with_captures(data, &mut captured_groups)
+    }
+
+    fn match_str_with_captures(&self, data: &str, captured_groups: &mut Vec<String>) -> bool {
         match self {
-            Pattern::StartOfLine => self.match_from_start(data),
+            Pattern::StartOfLine => self.match_from_start(data, captured_groups),
             Pattern::EndOfLine => data.is_empty(),
             Pattern::Sequence(patterns) => {
                 if patterns.first() == Some(&Pattern::StartOfLine) && patterns.last() == Some(&Pattern::EndOfLine) {
                     // Both start and end anchors
                     let without_anchors = Pattern::Sequence(patterns[1..patterns.len()-1].to_vec());
-                    without_anchors.match_from_start(data) && data.len() == without_anchors.match_length(data)
+                    without_anchors.match_from_start(data, captured_groups) && data.len() == without_anchors.match_length(data, captured_groups)
                 } else if patterns.first() == Some(&Pattern::StartOfLine) {
                     // Only start anchor
-                    self.match_from_start(data)
+                    self.match_from_start(data, captured_groups)
                 } else if patterns.last() == Some(&Pattern::EndOfLine) {
                     // Only end anchor
                     let without_end = Pattern::Sequence(patterns[..patterns.len() - 1].to_vec());
-                    without_end.match_from_start(data) && data.len() == without_end.match_length(data)
+                    without_end.match_from_start(data, captured_groups) && data.len() == without_end.match_length(data, captured_groups)
                 } else {
                     // No anchors
-                    (0..=data.len()).any(|i| self.match_from_start(&data[i..]))
+                    (0..=data.len()).any(|i| self.match_from_start(&data[i..], captured_groups))
                 }
             }
-            _ => (0..=data.len()).any(|i| self.match_from_start(&data[i..]))
+            _ => (0..=data.len()).any(|i| self.match_from_start(&data[i..], captured_groups))
         }
     }
 
-    fn match_from_start(&self, data: &str) -> bool {
+    fn match_from_start(&self, data: &str, captured_groups: &mut Vec<String>) -> bool {
         match self {
             Pattern::ExactChar(c) => data.starts_with(*c),
             Pattern::AnyChar => !data.is_empty(),
             Pattern::AlphaNumeric => data.chars().next().map_or(false, |c| c.is_alphanumeric() || c == '_'),
             Pattern::Sequence(sub_patterns) => {
                 let mut remaining = data;
+                let start_len = captured_groups.len();
                 for sub_pattern in sub_patterns {
-                    if let Some(new_remaining) = sub_pattern.consume_match(remaining) {
+                    if let Some(new_remaining) = sub_pattern.consume_match(remaining, captured_groups) {
                         remaining = new_remaining;
                     } else {
+                        captured_groups.truncate(start_len);
                         return false;
                     }
+                }
+                if !remaining.is_empty() {
+                    captured_groups.push(data[..data.len() - remaining.len()].to_string());
                 }
                 true
             },
@@ -169,12 +184,12 @@ impl Pattern {
                 data.chars().next().map_or(false, |c| chars.contains(c) != *negated)
             },
             Pattern::StartOfLine => true,
-            Pattern::OneOf(sub_patterns) => sub_patterns.iter().any(|p| p.match_from_start(data)),
+            Pattern::OneOf(sub_patterns) => sub_patterns.iter().any(|p| p.match_from_start(data, captured_groups)),
             Pattern::Repeated { min, max, pattern } => {
                 let mut count = 0;
                 let mut remaining = data;
                 while max.map_or(true, |m| count < m) {
-                    if let Some(new_remaining) = pattern.consume_match(remaining) {
+                    if let Some(new_remaining) = pattern.consume_match(remaining, captured_groups) {
                         remaining = new_remaining;
                         count += 1;
                     } else {
@@ -187,28 +202,35 @@ impl Pattern {
             Pattern::OneOrMore(pattern) => {
                 let mut remaining = data;
                 let mut matched = false;
-                while let Some(new_remaining) = pattern.consume_match(remaining) {
+                while let Some(new_remaining) = pattern.consume_match(remaining, captured_groups) {
                     remaining = new_remaining;
                     matched = true;
                 }
                 matched
             },
             Pattern::ZeroOrOne(pattern) => {
-                pattern.consume_match(data).is_some() || true
+                pattern.consume_match(data, captured_groups).is_some() || true
             },
-            Pattern::Alternation(patterns) => patterns.iter().any(|p| p.match_from_start(data)),
+            Pattern::Alternation(patterns) => patterns.iter().any(|p| p.match_from_start(data, captured_groups)),
+            Pattern::Backreference(n) => {
+                if let Some(group) = captured_groups.get(*n - 1) {
+                    data.starts_with(group)
+                } else {
+                    false
+                }
+            },
         }
     }
 
-    fn consume_match<'a>(&self, data: &'a str) -> Option<&'a str> {
-        if self.match_from_start(data) {
-            Some(&data[self.match_length(data)..])
+    fn consume_match<'a>(&self, data: &'a str, captured_groups: &mut Vec<String>) -> Option<&'a str> {
+        if self.match_from_start(data, captured_groups) {
+            Some(&data[self.match_length(data, captured_groups)..])
         } else {
             None
         }
     }
 
-    fn match_length(&self, data: &str) -> usize {
+    fn match_length(&self, data: &str, captured_groups: &mut Vec<String>) -> usize {
         match self {
             Pattern::ExactChar(_) => 1,
             Pattern::AnyChar => 1,
@@ -217,7 +239,7 @@ impl Pattern {
                 let mut length = 0;
                 let mut remaining = data;
                 for sub_pattern in sub_patterns {
-                    if let Some(new_remaining) = sub_pattern.consume_match(remaining) {
+                    if let Some(new_remaining) = sub_pattern.consume_match(remaining, captured_groups) {
                         length += remaining.len() - new_remaining.len();
                         remaining = new_remaining;
                     } else {
@@ -230,7 +252,7 @@ impl Pattern {
             Pattern::StartOfLine => 0,
             Pattern::OneOf(sub_patterns) => sub_patterns
                 .iter()
-                .filter_map(|p| p.consume_match(data).map(|r| data.len() - r.len()))
+                .filter_map(|p| p.consume_match(data, captured_groups).map(|r| data.len() - r.len()))
                 .next()
                 .unwrap_or(0),
             Pattern::Repeated { min: _, max, pattern } => {
@@ -238,7 +260,7 @@ impl Pattern {
                 let mut length = 0;
                 let mut remaining = data;
                 while max.map_or(true, |m| count < m) {
-                    if let Some(new_remaining) = pattern.consume_match(remaining) {
+                    if let Some(new_remaining) = pattern.consume_match(remaining, captured_groups) {
                         length += remaining.len() - new_remaining.len();
                         remaining = new_remaining;
                         count += 1;
@@ -252,20 +274,31 @@ impl Pattern {
             Pattern::OneOrMore(pattern) => {
                 let mut length = 0;
                 let mut remaining = data;
-                while let Some(new_remaining) = pattern.consume_match(remaining) {
+                while let Some(new_remaining) = pattern.consume_match(remaining, captured_groups) {
                     length += remaining.len() - new_remaining.len();
                     remaining = new_remaining;
                 }
                 length
             },
             Pattern::ZeroOrOne(pattern) => {
-                pattern.consume_match(data).map_or(0, |r| data.len() - r.len())
+                pattern.consume_match(data, captured_groups).map_or(0, |r| data.len() - r.len())
             },
             Pattern::Alternation(patterns) => patterns
                 .iter()
-                .filter_map(|p| p.consume_match(data).map(|r| data.len() - r.len()))
+                .filter_map(|p| p.consume_match(data, captured_groups).map(|r| data.len() - r.len()))
                 .max()
                 .unwrap_or(0),
+            Pattern::Backreference(n) => {
+                if let Some(group) = captured_groups.get(*n - 1) {
+                    if data.starts_with(group) {
+                        group.len()
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            },
         }
     }
 }
@@ -506,5 +539,14 @@ mod tests {
         assert_eq!(Pattern::from_str("a(b|c)d").expect("valid").match_str("abd"), true);
         assert_eq!(Pattern::from_str("a(b|c)d").expect("valid").match_str("acd"), true);
         assert_eq!(Pattern::from_str("a(b|c)d").expect("valid").match_str("ad"), false);
+    }
+
+    #[test]
+    fn test_backreferences() {
+        assert_eq!(Pattern::from_str("(cat) and \\1").expect("valid").match_str("cat and cat"), true);
+        assert_eq!(Pattern::from_str("(cat) and \\1").expect("valid").match_str("cat and dog"), false);
+        assert_eq!(Pattern::from_str("(\\w+) and \\1").expect("valid").match_str("cat and cat"), true);
+        assert_eq!(Pattern::from_str("(\\w+) and \\1").expect("valid").match_str("dog and dog"), true);
+        assert_eq!(Pattern::from_str("(\\w+) and \\1").expect("valid").match_str("cat and dog"), false);
     }
 }
