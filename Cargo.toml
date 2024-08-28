@@ -12,3 +12,5 @@ map-macro = "0.3.0"
 test-log = "0.2.16"
 thiserror = "1.0.38"                             # error handling
 tracing = "0.1.40"
+log = "0.4.22"
+env_logger = "0.10.0"
