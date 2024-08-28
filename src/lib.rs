@@ -1,12 +1,11 @@
-use std::{collections::HashSet, str::FromStr};
-use map_macro::hash_set;
+use std::str::FromStr;
 use tracing::{instrument, trace};
+
 #[derive(Clone, Debug, PartialEq, PartialOrd)]
 pub enum Pattern {
     ExactChar(char),
     AnyChar,
-    Digit,        // 0-9
-    AlphaNumeric, // a-zA-Z0-9_
+    AlphaNumeric,
     Sequence(Vec<Pattern>),
     Repeated {
         min: usize,
@@ -20,25 +19,7 @@ pub enum Pattern {
     },
     StartOfLine,
 }
-trait CharOperations {
-    fn first_char(&self) -> Option<char>;
-    fn first_char_in(&self, options: &str) -> bool;
-    fn skip_first_char(&self) -> Self;
-}
-impl CharOperations for &str {
-    fn first_char(&self) -> Option<char> {
-        return self.chars().next();
-    }
-    fn first_char_in(&self, options: &str) -> bool {
-        match self.first_char() {
-            Some(c) => options.contains(c),
-            None => false,
-        }
-    }
-    fn skip_first_char(&self) -> Self {
-        &self[1..]
-    }
-}
+
 impl FromStr for Pattern {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -48,13 +29,12 @@ impl FromStr for Pattern {
             let el = match c {
                 '\\' => match char_iterator.next() {
                     Some('w') => Pattern::AlphaNumeric,
-                    Some('d') => Pattern::Digit,
-                    Some(c) => Pattern::ExactChar(c), // assume an escape
+                    Some('d') => Pattern::CharacterSet { chars: "0123456789".to_string(), negated: false },
+                    Some(c) => Pattern::ExactChar(c),
                     None => return Err(format!("Unterminated escape in {:?}", s)),
                 },
                 '.' => Pattern::AnyChar,
                 '*' => {
-                    // need to grab last item and repeat
                     match items.pop() {
                         Some(p) => Pattern::Repeated {
                             min: 0,
@@ -71,7 +51,6 @@ impl FromStr for Pattern {
                     for c2 in char_iterator.by_ref() {
                         match c2 {
                             '^' if chars.is_empty() => negated = true,
-                            // TODO: should we handle escapes here?
                             ']' => {
                                 found_end = true;
                                 break;
@@ -84,6 +63,7 @@ impl FromStr for Pattern {
                     }
                     Pattern::CharacterSet { chars, negated }
                 }
+                '^' if items.is_empty() => Pattern::StartOfLine,
                 e => Pattern::ExactChar(e),
             };
             items.push(el);
@@ -94,118 +74,123 @@ impl FromStr for Pattern {
         Ok(Pattern::Sequence(items))
     }
 }
+
 impl Pattern {
     #[instrument]
-    pub fn match_str<'a>(&'_ self, data: &'a str) -> HashSet<&'a str> {
+    pub fn match_str(&self, data: &str) -> bool {
         trace!("Matching starts");
         match self {
-            Pattern::AnyChar if data.first_char().is_some() => hash_set! {data.skip_first_char()},
-            Pattern::ExactChar(c) if data.first_char() == Some(*c) => {
-                hash_set! {data.skip_first_char()}
+            Pattern::StartOfLine => self.match_from_start(data),
+            Pattern::Sequence(patterns) if patterns.first() == Some(&Pattern::StartOfLine) => {
+                self.match_from_start(data)
             }
-            Pattern::Digit if data.first_char_in("0123456789") => {
-                hash_set! {data.skip_first_char()}
-            }
-            Pattern::AlphaNumeric
-                if data.first_char_in(
-                    "_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
-                ) =>
-            {
-                hash_set! {data.skip_first_char()}
-            }
+            _ => (0..=data.len()).any(|i| self.match_from_start(&data[i..]))
+        }
+    }
+
+    fn match_from_start(&self, data: &str) -> bool {
+        match self {
+            Pattern::ExactChar(c) => data.starts_with(*c),
+            Pattern::AnyChar => !data.is_empty(),
+            Pattern::AlphaNumeric => data.chars().next().map_or(false, |c| c.is_alphanumeric() || c == '_'),
             Pattern::Sequence(sub_patterns) => {
-                let mut remaining = hash_set! {data};
+                let mut remaining = data;
                 for sub_pattern in sub_patterns {
-                    let mut next_remaining = HashSet::new();
-                    for r in remaining.iter() {
-                        for i in 0..r.len() {
-                            let sub_matches = sub_pattern.match_str(&r[i..]);
-                            if !sub_matches.is_empty() {
-                                next_remaining.extend(sub_matches);
-                                break;
-                            }
-                        }
-                    }
-                    remaining = next_remaining;
-                    if remaining.is_empty() {
-                        break;
+                    if let Some(new_remaining) = sub_pattern.consume_match(remaining) {
+                        remaining = new_remaining;
+                    } else {
+                        return false;
                     }
                 }
-                remaining
-            }
+                true
+            },
             Pattern::CharacterSet { chars, negated } => {
-                trace!(
-                    "TEST: {} and {} (for {})",
-                    data.first_char_in(chars),
-                    negated,
-                    chars
-                );
-                if !data.is_empty() && data.first_char_in(chars) != *negated {
-                    hash_set! {data.skip_first_char()}
-                } else {
-                    HashSet::new()
-                }
-            }
-            Pattern::OneOf(sub_patterns) => {
-                let mut result = HashSet::new();
-                for sub_pattern in sub_patterns {
-                    result.extend(sub_pattern.match_str(data))
-                }
-                result
-            }
+                data.chars().next().map_or(false, |c| chars.contains(c) != *negated)
+            },
+            Pattern::StartOfLine => true,
+            Pattern::OneOf(sub_patterns) => sub_patterns.iter().any(|p| p.match_from_start(data)),
             Pattern::Repeated { min, max, pattern } => {
-                let mut results: HashSet<&str> = HashSet::new();
-                let mut remaining = vec![data];
                 let mut count = 0;
-                while !remaining.is_empty() {
-                    if count >= *min {
-                        // all matches appended
-                        results.extend(remaining.iter());
-                    }
-                    count += 1;
-                    // did we reach max count
-                    if max.map(|m| m < count).unwrap_or(false) {
+                let mut remaining = data;
+                while max.map_or(true, |m| count < m) {
+                    if let Some(new_remaining) = pattern.consume_match(remaining) {
+                        remaining = new_remaining;
+                        count += 1;
+                    } else {
                         break;
                     }
-                    // try matching for the pattern and append
-                    let mut new_ends = Vec::new();
-                    for r in remaining {
-                        for x in pattern.match_str(r) {
-                            if results.contains(x) {
-                                continue; // already considered
-                            }
-                            new_ends.push(x);
-                        }
+                }
+                count >= *min
+            },
+        }
+    }
+
+    fn consume_match<'a>(&self, data: &'a str) -> Option<&'a str> {
+        if self.match_from_start(data) {
+            Some(&data[self.match_length(data)..])
+        } else {
+            None
+        }
+    }
+
+    fn match_length(&self, data: &str) -> usize {
+        match self {
+            Pattern::ExactChar(_) => 1,
+            Pattern::AnyChar => 1,
+            Pattern::AlphaNumeric => 1,
+            Pattern::Sequence(sub_patterns) => {
+                let mut length = 0;
+                let mut remaining = data;
+                for sub_pattern in sub_patterns {
+                    if let Some(new_remaining) = sub_pattern.consume_match(remaining) {
+                        length += remaining.len() - new_remaining.len();
+                        remaining = new_remaining;
+                    } else {
+                        break;
                     }
-                    remaining = new_ends;
                 }
-                results
-            }
-            Pattern::StartOfLine => {
-                if data.is_empty() || data.starts_with('\n') {
-                    hash_set! { data }
-                } else {
-                    HashSet::new()
+                length
+            },
+            Pattern::CharacterSet { .. } => 1,
+            Pattern::StartOfLine => 0,
+            Pattern::OneOf(sub_patterns) => sub_patterns
+                .iter()
+                .filter_map(|p| p.consume_match(data).map(|r| data.len() - r.len()))
+                .next()
+                .unwrap_or(0),
+            Pattern::Repeated { min: _, max, pattern } => {
+                let mut count = 0;
+                let mut length = 0;
+                let mut remaining = data;
+                while max.map_or(true, |m| count < m) {
+                    if let Some(new_remaining) = pattern.consume_match(remaining) {
+                        length += remaining.len() - new_remaining.len();
+                        remaining = new_remaining;
+                        count += 1;
+                    } else {
+                        break;
+                    }
                 }
-            }
-            _ => HashSet::new(),
+                length
+            },
         }
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn test_match_str_exact_char() {
-        assert_eq!(Pattern::ExactChar('A').match_str("ABC"), hash_set! {"BC"});
-        assert!(Pattern::ExactChar('X').match_str("ABC").is_empty());
-        assert_eq!(Pattern::ExactChar('C').match_str("C"), hash_set![""]);
+        assert_eq!(Pattern::ExactChar('A').match_str("ABC"), true);
+        assert_eq!(Pattern::ExactChar('X').match_str("ABC"), false);
+        assert_eq!(Pattern::ExactChar('C').match_str("C"), true);
     }
     #[test]
     fn test_match_str_digit() {
-        assert_eq!(Pattern::Digit.match_str("123"), hash_set!["23"]);
-        assert!(Pattern::Digit.match_str("ABC").is_empty());
-        assert_eq!(Pattern::Digit.match_str("9"), hash_set![""]);
+        assert_eq!(Pattern::CharacterSet { chars: "0123456789".to_string(), negated: false }.match_str("123"), true);
+        assert_eq!(Pattern::CharacterSet { chars: "0123456789".to_string(), negated: false }.match_str("ABC"), false);
+        assert_eq!(Pattern::CharacterSet { chars: "0123456789".to_string(), negated: false }.match_str("9"), true);
     }
     #[test]
     fn test_match_repeated() {
@@ -213,49 +198,49 @@ mod tests {
             Pattern::Repeated {
                 min: 0,
                 max: Some(2),
-                pattern: Box::new(Pattern::Digit)
+                pattern: Box::new(Pattern::CharacterSet { chars: "0123456789".to_string(), negated: false })
             }
             .match_str("123"),
-            hash_set!["123", "23", "3"],
+            true
         );
         assert_eq!(
             Pattern::Repeated {
                 min: 2,
                 max: Some(3),
-                pattern: Box::new(Pattern::Digit)
+                pattern: Box::new(Pattern::CharacterSet { chars: "0123456789".to_string(), negated: false })
             }
             .match_str("12345"),
-            hash_set!["345", "45"]
+            true
         );
         assert_eq!(
             Pattern::Repeated {
                 min: 2,
                 max: None,
-                pattern: Box::new(Pattern::Digit)
+                pattern: Box::new(Pattern::CharacterSet { chars: "0123456789".to_string(), negated: false })
             }
             .match_str("12345"),
-            hash_set!["345", "45", "5", ""]
+            true
         );
         assert_eq!(
             Pattern::Repeated {
                 min: 2,
                 max: None,
-                pattern: Box::new(Pattern::Digit)
+                pattern: Box::new(Pattern::CharacterSet { chars: "0123456789".to_string(), negated: false })
             }
             .match_str("123ABC"),
-            hash_set!["3ABC", "ABC"]
+            true
         );
     }
     #[test]
     fn test_match_str_sequence() {
         assert_eq!(
             Pattern::Sequence(vec![
-                Pattern::Digit,
+                Pattern::CharacterSet { chars: "0123456789".to_string(), negated: false },
                 Pattern::ExactChar('Z'),
-                Pattern::Digit,
+                Pattern::CharacterSet { chars: "0123456789".to_string(), negated: false },
             ])
             .match_str("1Z2XY"),
-            hash_set!["XY"]
+            true
         );
     }
     #[test_log::test]
@@ -264,84 +249,84 @@ mod tests {
             Pattern::from_str("AB\\d\\dZZ")
                 .expect("valid")
                 .match_str("AB12ZZCD"),
-            hash_set!["CD"]
+            true
         );
         assert_eq!(
             Pattern::from_str("..\\dA")
                 .expect("valid")
                 .match_str("A12A"),
-            hash_set![""]
+            true
         );
         assert_eq!(
             Pattern::from_str(".*foo")
                 .expect("valid")
                 .match_str("foobar"),
-            hash_set!["bar"]
+            true
         );
         assert_eq!(
             Pattern::from_str(".*foo")
                 .expect("valid")
                 .match_str("somefoobar"),
-            hash_set!["bar"]
+            true
         );
         assert_eq!(
             Pattern::from_str(".*ZZ.*X")
                 .expect("valid")
                 .match_str("ABCZZZ12XX"),
-            hash_set!["X", ""]
+            true
         );
         assert_eq!(
             Pattern::from_str("[abc]*test")
                 .expect("valid")
                 .match_str("aabbcatest12"),
-            hash_set!["12"]
+            true
         );
         assert_eq!(
             Pattern::from_str("[^xyz]*xtest")
                 .expect("valid")
                 .match_str("aabbcaxtest12"),
-            hash_set!["12"]
+            true
         );
         assert_eq!(
             Pattern::from_str("[^xyz]*test")
                 .expect("valid")
                 .match_str("aabbcatest12"),
-            hash_set!["12"]
+            true
         );
         assert_eq!(
             Pattern::from_str("\\d apple")
                 .expect("valid")
                 .match_str("1 apple"),
-            hash_set![""]
+            true
         );
     }
 
     #[test]
     fn test_any_char() {
-        assert_eq!(Pattern::AnyChar.match_str("ABC"), hash_set!["BC"]);
-        assert_eq!(Pattern::AnyChar.match_str("A"), hash_set![""]);
-        assert!(Pattern::AnyChar.match_str("").is_empty());
+        assert_eq!(Pattern::AnyChar.match_str("ABC"), true);
+        assert_eq!(Pattern::AnyChar.match_str("A"), true);
+        assert_eq!(Pattern::AnyChar.match_str(""), false);
     }
 
     #[test]
     fn test_alpha_numeric() {
-        assert_eq!(Pattern::AlphaNumeric.match_str("a123"), hash_set!["123"]);
-        assert_eq!(Pattern::AlphaNumeric.match_str("_abc"), hash_set!["abc"]);
-        assert_eq!(Pattern::AlphaNumeric.match_str("9xyz"), hash_set!["xyz"]);
-        assert!(Pattern::AlphaNumeric.match_str("!abc").is_empty());
+        assert_eq!(Pattern::AlphaNumeric.match_str("a123"), true);
+        assert_eq!(Pattern::AlphaNumeric.match_str("_abc"), true);
+        assert_eq!(Pattern::AlphaNumeric.match_str("9xyz"), true);
+        assert_eq!(Pattern::AlphaNumeric.match_str("!abc"), false);
     }
 
     #[test]
     fn test_one_of() {
         let pattern = Pattern::OneOf(vec![
             Pattern::ExactChar('a'),
-            Pattern::Digit,
+            Pattern::CharacterSet { chars: "0123456789".to_string(), negated: false },
             Pattern::ExactChar('x'),
         ]);
-        assert_eq!(pattern.match_str("abc"), hash_set!["bc"]);
-        assert_eq!(pattern.match_str("123"), hash_set!["23"]);
-        assert_eq!(pattern.match_str("xyz"), hash_set!["yz"]);
-        assert!(pattern.match_str("bcd").is_empty());
+        assert_eq!(pattern.match_str("abc"), true);
+        assert_eq!(pattern.match_str("123"), true);
+        assert_eq!(pattern.match_str("xyz"), true);
+        assert_eq!(pattern.match_str("bcd"), false);
     }
 
     #[test]
@@ -350,15 +335,15 @@ mod tests {
             chars: "aeiou".to_string(),
             negated: false,
         };
-        assert_eq!(pattern.match_str("apple"), hash_set!["pple"]);
-        assert!(pattern.match_str("xyz").is_empty());
+        assert_eq!(pattern.match_str("apple"), true);
+        assert_eq!(pattern.match_str("xyz"), false);
 
         let negated_pattern = Pattern::CharacterSet {
             chars: "aeiou".to_string(),
             negated: true,
         };
-        assert_eq!(negated_pattern.match_str("xyz"), hash_set!["yz"]);
-        assert!(negated_pattern.match_str("apple").is_empty());
+        assert_eq!(negated_pattern.match_str("xyz"), true);
+        assert_eq!(negated_pattern.match_str("apple"), false);
     }
 
     #[test]
@@ -366,5 +351,19 @@ mod tests {
         assert!(Pattern::from_str("a[bc").is_err());
         assert!(Pattern::from_str("a\\").is_err());
         assert!(Pattern::from_str("*").is_err());
+    }
+
+    #[test]
+    fn test_start_of_line() {
+        assert_eq!(
+            Pattern::from_str("^log").expect("valid").match_str("log"),
+            true
+        );
+        assert_eq!(Pattern::from_str("^log").expect("valid").match_str("slog"), false);
+        assert_eq!(
+            Pattern::from_str("^\\d\\d").expect("valid").match_str("12abc"),
+            true
+        );
+        assert_eq!(Pattern::from_str("^\\d\\d").expect("valid").match_str("a12bc"), false);
     }
 }

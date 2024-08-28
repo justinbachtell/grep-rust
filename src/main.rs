@@ -15,14 +15,16 @@ fn main() {
     let pattern_str = env::args().nth(2).expect("No pattern provided");
     let pattern = Pattern::from_str(&pattern_str).expect("Invalid pattern");
 
-    // Read the entire input from stdin
+    // Read input line by line
     let mut input = String::new();
     io::stdin().read_to_string(&mut input).unwrap();
 
-    // Check if the input matches the pattern
-    let matches = pattern.match_str(&input);
+    // Remove trailing newline if present
+    let input = input.trim_end();
 
-    if !matches.is_empty() {
+    let has_match = pattern.match_str(input);
+
+    if has_match {
         println!("Pattern matches!");
         process::exit(0);
     } else {
