@@ -3,11 +3,12 @@ mod parser;
 mod matcher;
 
 pub use pattern::Pattern;
+pub use parser::parse_pattern;
+pub use matcher::Matcher;
 
 use std::env;
 use std::io::{self, Read};
 use std::error::Error;
-use std::str::FromStr;
 
 pub fn run() -> Result<(), Box<dyn Error>> {
     // Check if the first argument is '-E'
@@ -18,7 +19,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     // Get the pattern from the second argument
     let pattern_str = env::args().nth(2).ok_or("No pattern provided")?;
     log::debug!("Pattern string: {:?}", pattern_str);
-    let pattern = Pattern::from_str(&pattern_str)?;
+    let pattern = parse_pattern(&pattern_str)?;
     log::debug!("Parsed pattern: {:?}", pattern);
 
     // Read input
@@ -29,7 +30,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let input = input.trim_end();
     log::debug!("Input: {:?}", input);
 
-    let has_match = pattern.match_str(input);
+    let has_match = Matcher::match_str(&pattern, input);
     log::debug!("Match result: {}", has_match);
     
     if has_match {
