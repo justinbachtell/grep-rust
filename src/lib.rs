@@ -18,6 +18,7 @@ pub enum Pattern {
         negated: bool,
     },
     StartOfLine,
+    EndOfLine,
 }
 
 impl FromStr for Pattern {
@@ -64,6 +65,7 @@ impl FromStr for Pattern {
                     Pattern::CharacterSet { chars, negated }
                 }
                 '^' if items.is_empty() => Pattern::StartOfLine,
+                '$' if char_iterator.clone().next().is_none() => Pattern::EndOfLine,
                 e => Pattern::ExactChar(e),
             };
             items.push(el);
@@ -81,8 +83,23 @@ impl Pattern {
         trace!("Matching starts");
         match self {
             Pattern::StartOfLine => self.match_from_start(data),
-            Pattern::Sequence(patterns) if patterns.first() == Some(&Pattern::StartOfLine) => {
-                self.match_from_start(data)
+            Pattern::EndOfLine => data.is_empty(),
+            Pattern::Sequence(patterns) => {
+                if patterns.first() == Some(&Pattern::StartOfLine) && patterns.last() == Some(&Pattern::EndOfLine) {
+                    // Both start and end anchors
+                    let without_anchors = Pattern::Sequence(patterns[1..patterns.len()-1].to_vec());
+                    without_anchors.match_from_start(data) && data.len() == without_anchors.match_length(data)
+                } else if patterns.first() == Some(&Pattern::StartOfLine) {
+                    // Only start anchor
+                    self.match_from_start(data)
+                } else if patterns.last() == Some(&Pattern::EndOfLine) {
+                    // Only end anchor
+                    let without_end = Pattern::Sequence(patterns[..patterns.len() - 1].to_vec());
+                    without_end.match_from_start(data) && data.len() == without_end.match_length(data)
+                } else {
+                    // No anchors
+                    (0..=data.len()).any(|i| self.match_from_start(&data[i..]))
+                }
             }
             _ => (0..=data.len()).any(|i| self.match_from_start(&data[i..]))
         }
@@ -122,6 +139,7 @@ impl Pattern {
                 }
                 count >= *min
             },
+            Pattern::EndOfLine => data.is_empty(),
         }
     }
 
@@ -173,6 +191,7 @@ impl Pattern {
                 }
                 length
             },
+            Pattern::EndOfLine => 0,
         }
     }
 }
@@ -365,5 +384,14 @@ mod tests {
             true
         );
         assert_eq!(Pattern::from_str("^\\d\\d").expect("valid").match_str("a12bc"), false);
+    }
+
+    #[test]
+    fn test_end_of_line() {
+        assert_eq!(Pattern::from_str("cat$").expect("valid").match_str("cat"), true);
+        assert_eq!(Pattern::from_str("cat$").expect("valid").match_str("cats"), false);
+        assert_eq!(Pattern::from_str("cat$").expect("valid").match_str("a cat"), true);
+        assert_eq!(Pattern::from_str("^cat$").expect("valid").match_str("cat"), true);
+        assert_eq!(Pattern::from_str("^cat$").expect("valid").match_str("a cat"), false);
     }
 }
