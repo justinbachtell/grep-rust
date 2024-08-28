@@ -164,19 +164,16 @@ impl Pattern {
             Pattern::ExactChar(c) => data.starts_with(*c),
             Pattern::AnyChar => !data.is_empty(),
             Pattern::AlphaNumeric => data.chars().next().map_or(false, |c| c.is_alphanumeric() || c == '_'),
-            Pattern::Sequence(sub_patterns) => {
+            Pattern::Sequence(patterns) => {
                 let mut remaining = data;
                 let start_len = captured_groups.len();
-                for sub_pattern in sub_patterns {
-                    if let Some(new_remaining) = sub_pattern.consume_match(remaining, captured_groups) {
+                for pattern in patterns {
+                    if let Some(new_remaining) = pattern.consume_match(remaining, captured_groups) {
                         remaining = new_remaining;
                     } else {
                         captured_groups.truncate(start_len);
                         return false;
                     }
-                }
-                if !remaining.is_empty() {
-                    captured_groups.push(data[..data.len() - remaining.len()].to_string());
                 }
                 true
             },
@@ -209,9 +206,24 @@ impl Pattern {
                 matched
             },
             Pattern::ZeroOrOne(pattern) => {
-                pattern.consume_match(data, captured_groups).is_some() || true
+                if let Some(new_remaining) = pattern.consume_match(data, captured_groups) {
+                    true
+                } else {
+                    true // Match even if the pattern doesn't consume anything
+                }
             },
-            Pattern::Alternation(patterns) => patterns.iter().any(|p| p.match_from_start(data, captured_groups)),
+            Pattern::Alternation(patterns) => {
+                let start_len = captured_groups.len();
+                for pattern in patterns {
+                    let mut temp_groups = captured_groups.clone();
+                    if pattern.match_from_start(data, &mut temp_groups) {
+                        *captured_groups = temp_groups;
+                        return true;
+                    }
+                }
+                captured_groups.truncate(start_len);
+                false
+            },
             Pattern::Backreference(n) => {
                 if let Some(group) = captured_groups.get(*n - 1) {
                     data.starts_with(group)
@@ -223,9 +235,19 @@ impl Pattern {
     }
 
     fn consume_match<'a>(&self, data: &'a str, captured_groups: &mut Vec<String>) -> Option<&'a str> {
+        let start_len = captured_groups.len();
         if self.match_from_start(data, captured_groups) {
-            Some(&data[self.match_length(data, captured_groups)..])
+            let length = self.match_length(data, captured_groups);
+            if length > 0 {
+                if let Pattern::Sequence(_) = self {
+                    captured_groups.push(data[..length].to_string());
+                }
+                Some(&data[length..])
+            } else {
+                Some(data) // Return the original data if no characters were consumed
+            }
         } else {
+            captured_groups.truncate(start_len);
             None
         }
     }
@@ -548,5 +570,122 @@ mod tests {
         assert_eq!(Pattern::from_str("(\\w+) and \\1").expect("valid").match_str("cat and cat"), true);
         assert_eq!(Pattern::from_str("(\\w+) and \\1").expect("valid").match_str("dog and dog"), true);
         assert_eq!(Pattern::from_str("(\\w+) and \\1").expect("valid").match_str("cat and dog"), false);
+        assert_eq!(Pattern::from_str("(\\w+)\\s+\\1").expect("valid").match_str("hello hello"), true);
+        assert_eq!(Pattern::from_str("(\\w+)\\s+\\1").expect("valid").match_str("hello world"), false);
+        assert_eq!(Pattern::from_str("(\\d+)-(\\w+)-(\\d+)\\s+\\3-\\2-\\1").expect("valid").match_str("123-abc-456 456-abc-123"), true);
+        assert_eq!(Pattern::from_str("(\\d+)-(\\w+)-(\\d+)\\s+\\3-\\2-\\1").expect("valid").match_str("123-abc-456 456-def-123"), false);
+        assert_eq!(Pattern::from_str("(a|b)c\\1").expect("valid").match_str("aca"), true);
+        assert_eq!(Pattern::from_str("(a|b)c\\1").expect("valid").match_str("bcb"), true);
+        assert_eq!(Pattern::from_str("(a|b)c\\1").expect("valid").match_str("acb"), false);
+        assert_eq!(Pattern::from_str("(\\w+)\\s+and\\s+\\1\\s+again").expect("valid").match_str("hello and hello again"), true);
+        assert_eq!(Pattern::from_str("(\\w+)\\s+and\\s+\\1\\s+again").expect("valid").match_str("hello and world again"), false);
+        assert_eq!(Pattern::from_str("(\\d{2}):(\\d{2})\\s+\\1:\\2").expect("valid").match_str("12:30 12:30"), true);
+        assert_eq!(Pattern::from_str("(\\d{2}):(\\d{2})\\s+\\1:\\2").expect("valid").match_str("12:30 12:45"), false);
+    }
+
+    #[test]
+    fn test_multiple_backreferences() {
+        assert_eq!(
+            Pattern::from_str("(\\d+) (\\w+) squares and \\1 \\2 circles")
+                .expect("valid")
+                .match_str("3 red squares and 3 red circles"),
+            true
+        );
+        assert_eq!(
+            Pattern::from_str("(\\d+) (\\w+) squares and \\1 \\2 circles")
+                .expect("valid")
+                .match_str("3 red squares and 4 red circles"),
+            false
+        );
+        assert_eq!(
+            Pattern::from_str("(\\w+) (\\w+) (\\w+) and \\3 \\2 \\1")
+                .expect("valid")
+                .match_str("one two three and three two one"),
+            true
+        );
+        assert_eq!(
+            Pattern::from_str("(\\w+) (\\w+) (\\w+) and \\3 \\2 \\1")
+                .expect("valid")
+                .match_str("one two three and three one two"),
+            false
+        );
+        assert_eq!(
+            Pattern::from_str("(\\w\\w\\w\\w) (\\d\\d\\d) is doing \\1 \\2 times")
+                .expect("valid")
+                .match_str("grep 101 is doing grep 101 times"),
+            true
+        );
+        assert_eq!(
+            Pattern::from_str("(\\w\\w\\w) (\\d\\d\\d) is doing \\1 \\2 times")
+                .expect("valid")
+                .match_str("$?! 101 is doing $?! 101 times"),
+            false
+        );
+        assert_eq!(
+            Pattern::from_str("(\\w\\w\\w\\w) (\\d\\d\\d) is doing \\1 \\2 times")
+                .expect("valid")
+                .match_str("grep yes is doing grep yes times"),
+            false
+        );
+        assert_eq!(
+            Pattern::from_str("([abc]+)-([def]+) is \\1-\\2, not [^xyz]+")
+                .expect("valid")
+                .match_str("abc-def is abc-def, not efg"),
+            true
+        );
+        assert_eq!(
+            Pattern::from_str("([abc]+)-([def]+) is \\1-\\2, not [^xyz]+")
+                .expect("valid")
+                .match_str("efg-hij is efg-hij, not efg"),
+            false
+        );
+        assert_eq!(
+            Pattern::from_str("([abc]+)-([def]+) is \\1-\\2, not [^xyz]+")
+                .expect("valid")
+                .match_str("abc-def is abc-def, not xyz"),
+            false
+        );
+        assert_eq!(
+            Pattern::from_str("^(\\w+) (\\w+), \\1 and \\2$")
+                .expect("valid")
+                .match_str("apple pie, apple and pie"),
+            true
+        );
+        assert_eq!(
+            Pattern::from_str("^(apple) (\\w+), \\1 and \\2$")
+                .expect("valid")
+                .match_str("pineapple pie, pineapple and pie"),
+            false
+        );
+        assert_eq!(
+            Pattern::from_str("^(\\w+) (pie), \\1 and \\2$")
+                .expect("valid")
+                .match_str("apple pie, apple and pies"),
+            false
+        );
+        assert_eq!(
+            Pattern::from_str("(how+dy) (he?y) there, \\1 \\2")
+                .expect("valid")
+                .match_str("howwdy hey there, howwdy hey"),
+            true
+        );
+        assert_eq!(
+            Pattern::from_str("(how+dy) (he?y) there, \\1 \\2")
+                .expect("valid")
+                .match_str("hody hey there, howwdy hey"),
+            false
+        );
+        assert_eq!(
+            Pattern::from_str("(how+dy) (he?y) there, \\1 \\2")
+                .expect("valid")
+                .match_str("howwdy heeey there, howwdy heeey"),
+            false
+        );
+        assert_eq!(
+            Pattern::from_str("(c.t|d.g) and (f..h|b..d), \\1 with \\2")
+                .expect("valid")
+                .match_str("cat and fish, cat with fish"),
+            true
+        );
     }
 }
